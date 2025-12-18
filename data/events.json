@@ -1,0 +1,38 @@
+[
+  {
+    "id": "0185e60a-5a26-43f7-9082-e4f1a0533e70",
+    "aggregateId": "agg-1",
+    "type": "decision.created",
+    "timestamp": "2025-12-18T14:47:37.617Z",
+    "payload": {
+      "summary": "from tenant A"
+    },
+    "meta": {
+      "actor": {
+        "userId": "u1"
+      },
+      "source": "user",
+      "decisionId": "dec-1",
+      "correlationId": "dec-1",
+      "tenantId": "tenant-a"
+    }
+  },
+  {
+    "id": "078a4665-c121-4d30-ba54-bffbe4befe2b",
+    "aggregateId": "agg-2",
+    "type": "decision.created",
+    "timestamp": "2025-12-18T14:47:37.625Z",
+    "payload": {
+      "summary": "from tenant B"
+    },
+    "meta": {
+      "actor": {
+        "userId": "u2"
+      },
+      "source": "user",
+      "decisionId": "dec-2",
+      "correlationId": "dec-2",
+      "tenantId": "tenant-b"
+    }
+  }
+]

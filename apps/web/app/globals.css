@@ -1,0 +1,22 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-background text-foreground;
+  font-family: "Space Grotesk", "Segoe UI", sans-serif;
+}
+
+.glass {
+  @apply bg-white/5 border border-white/10 backdrop-blur-md;
+}
+
+.glow {
+  @apply border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.08),0_10px_40px_rgba(0,0,0,0.3)];
+}

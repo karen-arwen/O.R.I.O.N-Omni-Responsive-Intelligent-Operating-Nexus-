@@ -1,0 +1,1 @@
+{"scoresByDomain":{"tasks":0.72,"agenda":0.61,"security":0.4},"defaultsByDomain":{"tasks":0.5,"agenda":0.5,"security":0.3},"deltas":{"accept":0.1,"reject":-0.15,"implicitRepeatNoAction":-0.05},"capabilities":{"canExecute":false,"v":"v0"}}

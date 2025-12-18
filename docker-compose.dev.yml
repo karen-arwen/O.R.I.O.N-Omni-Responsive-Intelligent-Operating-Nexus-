@@ -1,0 +1,80 @@
+version: "3.9"
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: orion
+      POSTGRES_USER: orion
+      POSTGRES_DB: orion
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orion"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    image: node:20
+    working_dir: /app
+    command: sh -c "npm install && npm run dev:api"
+    ports:
+      - "3000:3000"
+    environment:
+      ORION_API_PORT: 3000
+      ORION_STORAGE_PATH: /app/data/events.json
+      ORION_ALLOWED_ORIGINS: "*"
+      ORION_DEV_AUTH_BYPASS: "true"
+      ORION_DB_URL: postgres://orion:orion@postgres:5432/orion
+      ORION_REDIS_URL: redis://redis:6379
+      ORION_EVENTSTORE_ADAPTER: postgres
+      ORION_RATE_LIMIT_BACKEND: redis
+      ORION_CACHE_ENABLED: "true"
+    volumes:
+      - .:/app
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+  worker:
+    image: node:20
+    working_dir: /app
+    command: sh -c "npm install && npm run dev:worker"
+    environment:
+      ORION_DB_URL: postgres://orion:orion@postgres:5432/orion
+      ORION_REDIS_URL: redis://redis:6379
+      ORION_WORKER_CONCURRENCY: 4
+    volumes:
+      - .:/app
+    depends_on:
+      api:
+        condition: service_started
+  web:
+    image: node:20
+    working_dir: /app
+    command: sh -c "npm install && npm run dev:web"
+    ports:
+      - "3001:3001"
+    environment:
+      NEXT_PUBLIC_ORION_API_BASE_URL: http://api:3000
+    volumes:
+      - .:/app
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

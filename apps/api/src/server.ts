@@ -10,6 +10,7 @@ import { PermissionEngine } from "../../../packages/permissions/src";
 import { DomainEvent, TimelineCursor } from "../../../packages/shared/src";
 import { sanitizeEventForTimeline, mapKind } from "../../../packages/shared/src/timeline";
 import { Planner } from "../../../packages/planner/src/planner";
+import { PlannerSnapshot } from "../../../packages/planner/src/types";
 import {
   TrustService,
   TrustEvents,
@@ -23,7 +24,7 @@ import { Pool } from "pg";
 import { RedisCache, RedisRateLimiter } from "./cache";
 import { JobRepository } from "./jobs/jobRepo";
 import { JobQueue } from "./jobs/queue";
-import { JobRecord, JobStatus } from "../../../packages/shared/src/jobs";
+import { JobRecord, JobStatus, jobTypeToPermission } from "../../../packages/shared/src/jobs";
 import { getTool } from "../../../packages/tools/src";
 
 const version = process.env.ORION_VERSION ?? "0.0.1";
@@ -100,6 +101,23 @@ type RequestContext = {
   actor: z.infer<typeof actorSchema>;
 };
 
+type JobRepoPort = {
+  createJob: (tenantId: string, input: any) => Promise<{ job: JobRecord; created: boolean }>;
+  getJob: (tenantId: string, jobId: string) => Promise<JobRecord | null>;
+  listJobs: (
+    tenantId: string,
+    filters: { status?: JobStatus; decisionId?: string; correlationId?: string; domain?: string; type?: string },
+    cursor?: { runAt: string; id: string },
+    limit?: number
+  ) => Promise<{ jobs: JobRecord[]; nextCursor: string | null }>;
+  updateStatus: (tenantId: string, jobId: string, patch: Partial<JobRecord>) => Promise<JobRecord | null>;
+};
+
+type JobQueuePort = {
+  enqueue: (job: JobRecord) => Promise<void>;
+  cancel: (jobId: string) => Promise<void>;
+};
+
 export type ServerDeps = {
   eventStore?: EventStore;
   auditLogger?: AuditLogger;
@@ -108,6 +126,8 @@ export type ServerDeps = {
   redisCache?: RedisCache | null;
   redisRateLimiter?: RedisRateLimiter | null;
   envOverrides?: Partial<z.infer<typeof envSchema>>;
+  jobRepo?: JobRepoPort | null;
+  jobQueue?: JobQueuePort | null;
 };
 
 const tenantRegex = /^[a-z0-9_-]{1,32}$/;
@@ -203,8 +223,8 @@ export const buildServer = (deps: ServerDeps = {}): FastifyInstance => {
   const redisLimiter =
     deps.redisRateLimiter ??
     (redisClient && rateBackend === "redis" ? new RedisRateLimiter(redisClient, env.ORION_RATE_LIMIT, env.ORION_RATE_WINDOW_MS) : null);
-  const jobRepo = pool ? new JobRepository(pool) : null;
-  const jobQueue = redisClient ? new JobQueue(redisClient) : null;
+  const jobRepo: JobRepoPort | null = deps.jobRepo ?? (pool ? new JobRepository(pool) : null);
+  const jobQueue: JobQueuePort | null = deps.jobQueue ?? (redisClient ? new JobQueue(redisClient) : null);
 
   const app = fastify({
     logger: { level: env.ORION_LOG_LEVEL },
@@ -430,6 +450,8 @@ export const buildServer = (deps: ServerDeps = {}): FastifyInstance => {
     payload: Record<string, unknown> = {}
   ) => {
     const { store } = scopedDeps(ctx);
+    const perm = jobTypeToPermission(job.type);
+    const domain = job.domain ?? perm.domain;
     const event: DomainEvent = {
       id: randomUUID(),
       aggregateId: job.decisionId ?? job.id,
@@ -442,6 +464,8 @@ export const buildServer = (deps: ServerDeps = {}): FastifyInstance => {
         attempts: job.attempts,
         maxAttempts: job.maxAttempts,
         runAt: job.runAt,
+        domain,
+        action: perm.action,
         summarySafe: safeSummary(payload?.summarySafe ?? job.type),
         ...payload,
       },
@@ -1065,31 +1089,102 @@ export const buildServer = (deps: ServerDeps = {}): FastifyInstance => {
     return reply.send({ job: updated ?? job });
   });
 
+  const deriveJobSpecFromSnapshot = (snapshot: PlannerSnapshot) => {
+    const intent = snapshot.intent ?? { domain: "generic", action: "execute", type: "generic" };
+    const intentType = intent.type ?? "generic";
+    const intentAction = intent.action ?? "execute";
+    const domain = intent.domain ?? "generic";
+    const mode = snapshot.recommendedOption?.mode ?? snapshot.mode;
+
+    const byIntent = () => {
+      if (intentType.includes("export")) return "tool.export_bundle";
+      if (intentType.includes("draft") || intentAction === "draft" || domain === "messaging") return "tool.generate_draft";
+      if (intentType.includes("note") || domain === "notes") return "tool.create_note";
+      if (intentType.startsWith("tasks.") || domain === "tasks") return "tool.create_task_stub";
+      return "tool.echo";
+    };
+    const type = mode === "act" ? byIntent() : byIntent();
+    const priority = snapshot.riskAssessment?.level === "high" ? 10 : snapshot.riskAssessment?.level === "medium" ? 5 : 1;
+    const maxAttempts = snapshot.riskAssessment?.level === "high" ? 2 : 3;
+    return { type, domain, priority, maxAttempts };
+  };
+
+  const buildJobInput = (snapshot: PlannerSnapshot, ctx: RequestContext) => {
+    const recommended = snapshot.recommendedOption;
+    return {
+      intent: snapshot.intent
+        ? {
+          type: snapshot.intent.type,
+          domain: snapshot.intent.domain,
+          action: snapshot.intent.action,
+        }
+        : undefined,
+      recommendedOption: recommended
+        ? { optionId: recommended.optionId, title: recommended.title, mode: recommended.mode }
+        : undefined,
+      explain: (snapshot.explain ?? []).slice(0, 5),
+      actor: { userId: ctx.actor.userId, roles: ctx.actor.roles },
+    };
+  };
+
   app.post("/decisions/:decisionId/execute", async (request, reply) => {
     const guard = ensureRole(request, reply, ["member", "admin"]);
     if (guard) return guard;
     const ctx = (request as any).ctx as RequestContext;
+    const { store } = scopedDeps(ctx);
     if (!jobRepo) return sendError(request, reply, 500, "jobs_unavailable", "Jobs require database backend");
     const decisionId = (request.params as any).decisionId as string;
     if (!decisionId) return sendError(request, reply, 400, "missing_decision_id", "Missing decisionId");
-    // simple mapping: use decisionId as idempotencyKey, tool echo snapshot intent
-    const body = (request.body as any) ?? {};
-    const tool = body.tool ?? "tool.echo";
-    const input = body.input ?? {};
+
+    const finalTypes = ["decision.ready_to_execute", "decision.suggested", "system.no_action"];
+    const finals = await store.query({ decisionId, types: finalTypes, limit: 50, tenantId: ctx.tenantId });
+    const finalEvent = finals.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+
+    if (!finalEvent) {
+      const partial = await store.query({
+        decisionId,
+        types: ["decision.created", "decision.optioned"],
+        tenantId: ctx.tenantId,
+      });
+      if (partial.length === 0) return sendError(request, reply, 404, "decision_not_found", "Decision not found");
+      return sendError(request, reply, 409, "not_executable", "Decision not ready to execute");
+    }
+    if (finalEvent.type !== "decision.ready_to_execute") {
+      return sendError(request, reply, 409, "not_executable", "Decision not ready to execute");
+    }
+
+    const snapshot: PlannerSnapshot | undefined = (finalEvent.payload as any)?.snapshot;
+    if (!snapshot) return sendError(request, reply, 500, "snapshot_missing", "Snapshot missing in final event");
+
+    const correlationId = finalEvent.meta.correlationId ?? decisionId;
+    const spec = deriveJobSpecFromSnapshot(snapshot);
+    const input = buildJobInput(snapshot, ctx);
     const { job, created } = await jobRepo.createJob(ctx.tenantId, {
       decisionId,
-      correlationId: body.correlationId ?? decisionId,
-      domain: body.domain ?? "generic",
-      type: tool,
+      correlationId,
+      domain: spec.domain,
+      type: spec.type,
       input,
+      runAt: new Date().toISOString(),
       idempotencyKey: decisionId,
+      maxAttempts: spec.maxAttempts,
+      priority: spec.priority,
     });
+
     if (created) {
+      metrics.jobs.queued += 1;
       await emitJobEvent(ctx, "job.created", job);
       await emitJobEvent(ctx, "job.queued", job);
       if (jobQueue) await jobQueue.enqueue(job);
     }
-    return reply.status(created ? 201 : 200).send({ job });
+
+    return reply.status(created ? 201 : 200).send({
+      jobId: job.id,
+      status: job.status,
+      decisionId: job.decisionId ?? decisionId,
+      correlationId: job.correlationId ?? correlationId,
+      capabilities: { canExecute: false, v: "v0" },
+    });
   });
 
   app.get("/trust", async (request, reply) => {

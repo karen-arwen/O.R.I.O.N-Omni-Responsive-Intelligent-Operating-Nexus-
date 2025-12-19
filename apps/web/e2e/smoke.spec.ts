@@ -42,6 +42,31 @@ test.beforeEach(async ({ page }) => {
       payload: {},
     },
   ];
+  const jobs = [
+    {
+      id: "job-1",
+      tenantId: "local",
+      createdAt: now,
+      updatedAt: now,
+      decisionId: "dec-123",
+      correlationId: "corr-1",
+      domain: "tasks",
+      type: "tool.create_note",
+      status: "queued",
+      priority: 0,
+      attempts: 0,
+      maxAttempts: 2,
+      runAt: now,
+      lockedAt: null,
+      lockedBy: null,
+      idempotencyKey: null,
+      input: {},
+      output: null,
+      error: null,
+      traceEventIds: null,
+      etag: null,
+    },
+  ];
 
   await page.route("**/health", (route) =>
     route.fulfill({ json: { status: "ok", uptime: 1, version: "test", timestamp: new Date().toISOString() } })
@@ -88,6 +113,14 @@ test.beforeEach(async ({ page }) => {
       },
     });
   });
+  await page.route("**/jobs?**", (route) => {
+    if (route.request().resourceType() !== "fetch" && route.request().resourceType() !== "xhr") return route.continue();
+    return route.fulfill({ json: { jobs, nextCursor: null } });
+  });
+  await page.route("**/jobs/job-1", (route) => {
+    if (route.request().resourceType() !== "fetch" && route.request().resourceType() !== "xhr") return route.continue();
+    return route.fulfill({ json: { job: jobs[0] } });
+  });
 });
 
 test("overview, timeline, and command palette smoke", async ({ page }) => {
@@ -121,4 +154,12 @@ test("mission, alerts, and decision detail render", async ({ page }) => {
   await page.goto("/decisions/dec-123");
   await expect(page.getByText("Decisao dec-123")).toBeVisible();
   await expect(page.getByText("Snapshot")).toBeVisible();
+});
+
+test("jobs list and detail render", async ({ page }) => {
+  await page.goto("/jobs");
+  await expect(page.getByRole("heading", { name: "Jobs" })).toBeVisible();
+  await page.getByText("job-1").click();
+  await expect(page.getByText("Job job-1")).toBeVisible();
+  await expect(page.getByText("Timeline do job")).toBeVisible();
 });

@@ -4,6 +4,8 @@ import { Command } from "cmdk";
 import { useEffect, useState, KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Zap } from "lucide-react";
+import { useExecuteDecision } from "../../lib/query/hooks";
+import { toast } from "../ui/Toast";
 
 const recentKey = "orion-recent-decisions";
 
@@ -11,6 +13,7 @@ const baseCommands = [
   { label: "Go to Overview", action: () => "/" },
   { label: "Go to Timeline", action: () => "/timeline" },
   { label: "Go to Decisions", action: () => "/decisions" },
+  { label: "Go to Jobs", action: () => "/jobs" },
   { label: "Go to Trust", action: () => "/trust" },
   { label: "Go to Settings", action: () => "/settings" },
   { label: "Mission Mode", action: () => "/mission" },
@@ -22,6 +25,7 @@ export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const [value, setValue] = useState("");
   const [recent, setRecent] = useState<string[]>([]);
+  const executeDecision = useExecuteDecision();
 
   useEffect(() => {
     const handler = () => setOpen(true);
@@ -62,6 +66,14 @@ export function CommandPalette() {
     else if (cmd === "open" && parts[1] === "corr" && parts[2]) navigate(`/timeline?correlationId=${parts[2]}`);
     else if (cmd === "export" && parts[1] === "decision" && parts[2]) navigate(`/decisions/${parts[2]}`);
     else if (cmd === "export" && parts[1] === "corr" && parts[2]) navigate(`/timeline?correlationId=${parts[2]}`);
+    else if (cmd === "jobs") navigate("/jobs");
+    else if (cmd === "job" && parts[1]) navigate(`/jobs/${parts[1]}`);
+    else if (cmd === "execute" && parts[1]) {
+      executeDecision
+        .mutateAsync(parts[1])
+        .then((res) => toast.success(`Job ${res.jobId} criado`))
+        .catch((err: any) => toast.error(err?.message ?? "Falha ao executar"));
+    }
     else if (cmd === "toggle" && parts[1] === "live") {
       const event = new CustomEvent("toggle-live");
       window.dispatchEvent(event);

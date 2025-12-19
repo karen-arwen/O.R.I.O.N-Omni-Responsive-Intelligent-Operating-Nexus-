@@ -141,18 +141,21 @@ export const sanitizeEventForTimeline = (event: DomainEvent) => {
     summary = "Auditoria registrada";
   } else if (kind === "system") {
     if (event.type.startsWith("job.")) {
+      const payloadAny: any = event.payload ?? {};
+      const errorRaw = payloadAny?.errorSafe ?? payloadAny?.error;
       payload = {
-        jobId: (event.payload as any)?.jobId,
-        type: (event.payload as any)?.jobType ?? event.type,
-        status: (event.payload as any)?.status,
-        attempts: (event.payload as any)?.attempts,
-        maxAttempts: (event.payload as any)?.maxAttempts,
-        runAt: (event.payload as any)?.runAt,
-        domain: (event.payload as any)?.domain ?? domain,
-        action: (event.payload as any)?.action,
-        summarySafe: truncateSafe((event.payload as any)?.summarySafe),
-        errorSafe: (event.payload as any)?.errorSafe
-          ? { ...((event.payload as any)?.errorSafe), message: truncateSafe((event.payload as any)?.errorSafe?.message, 512) }
+        jobId: payloadAny?.jobId,
+        type: payloadAny?.jobType ?? event.type,
+        status: payloadAny?.status,
+        attempts: payloadAny?.attempts,
+        maxAttempts: payloadAny?.maxAttempts,
+        runAt: payloadAny?.runAt,
+        domain: payloadAny?.domain ?? domain,
+        action: payloadAny?.action,
+        summarySafe: truncateSafe(payloadAny?.summarySafe ?? payloadAny?.reasonHuman ?? payloadAny?.reasonTechnical),
+        outputSafe: truncateSafe(payloadAny?.outputSafe ?? payloadAny?.output, 2048),
+        errorSafe: errorRaw
+          ? { ...errorRaw, message: truncateSafe((errorRaw as any)?.message ?? (errorRaw as any)?.reason, 512) }
           : undefined,
       };
       summary =
@@ -178,11 +181,13 @@ export const sanitizeEventForTimeline = (event: DomainEvent) => {
       summary = "Evento de sistema";
     }
   } else if (event.type.startsWith("tool.")) {
+    const payloadAny: any = event.payload ?? {};
     payload = {
-      jobId: (event.payload as any)?.jobId,
+      jobId: payloadAny?.jobId,
       tool: event.type,
-      summarySafe: truncateSafe((event.payload as any)?.summarySafe),
-      outputSafe: truncateSafe((event.payload as any)?.outputSafe, 2048),
+      summarySafe: truncateSafe(payloadAny?.summarySafe ?? payloadAny?.description ?? payloadAny?.echo),
+      outputSafe: truncateSafe(payloadAny?.outputSafe ?? payloadAny?.output, 2048),
+      domain: payloadAny?.domain ?? domain,
     };
     summary =
       event.type === "tool.echoed"

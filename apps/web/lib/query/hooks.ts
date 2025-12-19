@@ -1,5 +1,18 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { fetchHealth, fetchSnapshot, fetchTimeline, fetchTrust, fetchTrustDomain, postFeedback } from "../api/endpoints";
+import {
+  fetchHealth,
+  fetchSnapshot,
+  fetchTimeline,
+  fetchTrust,
+  fetchTrustDomain,
+  postFeedback,
+  fetchJobs,
+  fetchJob,
+  executeDecision,
+  cancelJob,
+  retryJob,
+} from "../api/endpoints";
+import type { JobsQueryParams } from "../api/endpoints";
 import { queryKeys } from "./keys";
 import { recordLatency } from "../telemetry/clientMetrics";
 import { useCallback } from "react";
@@ -63,3 +76,78 @@ export const useApiHealth = () => {
   }, [health, qc]);
   return { health, retryAll };
 };
+
+export const useJobs = (params: JobsQueryParams) => {
+  return useInfiniteQuery({
+    queryKey: queryKeys.jobs(params),
+    queryFn: async ({ pageParam }) => {
+      const start = performance.now();
+      const data = await fetchJobs({ ...params, cursor: pageParam, limit: params.limit ?? 20 });
+      recordLatency("jobs", performance.now() - start);
+      return data;
+    },
+    getNextPageParam: (last) => last.nextCursor ?? undefined,
+    retry: 0,
+  });
+};
+
+export const useJob = (jobId: string) =>
+  useQuery({
+    queryKey: queryKeys.job(jobId),
+    queryFn: () => fetchJob(jobId),
+    enabled: !!jobId,
+    retry: 0,
+  });
+
+export const useExecuteDecision = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (decisionId: string) => executeDecision(decisionId),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: queryKeys.jobsSummary });
+      qc.invalidateQueries({ queryKey: queryKeys.jobs({}) });
+      qc.invalidateQueries({ queryKey: queryKeys.job(res.jobId) });
+      qc.invalidateQueries({ queryKey: queryKeys.timeline({ decisionId: res.decisionId }) });
+    },
+  });
+};
+
+export const useCancelJob = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (jobId: string) => cancelJob(jobId),
+    onSuccess: (_data, jobId) => {
+      qc.invalidateQueries({ queryKey: queryKeys.job(jobId) });
+      qc.invalidateQueries({ queryKey: queryKeys.jobsSummary });
+    },
+  });
+};
+
+export const useRetryJob = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (jobId: string) => retryJob(jobId),
+    onSuccess: (_data, jobId) => {
+      qc.invalidateQueries({ queryKey: queryKeys.job(jobId) });
+      qc.invalidateQueries({ queryKey: queryKeys.jobsSummary });
+    },
+  });
+};
+
+export const useJobsSummary = () =>
+  useQuery({
+    queryKey: queryKeys.jobsSummary,
+    queryFn: async () => {
+      const res = await fetchJobs({ limit: 50 });
+      const counts = res.jobs.reduce(
+        (acc, job) => {
+          acc[job.status] = (acc[job.status] ?? 0) + 1;
+          return acc;
+        },
+        {} as Record<string, number>
+      );
+      return { counts, unavailable: (res as any).unavailable };
+    },
+    staleTime: 10_000,
+    retry: 0,
+  });

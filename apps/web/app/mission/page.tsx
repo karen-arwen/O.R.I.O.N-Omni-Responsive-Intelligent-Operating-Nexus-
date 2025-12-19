@@ -1,7 +1,7 @@
 "use client";
 
 import AppShell from "../../components/layout/AppShell";
-import { useTimeline } from "../../lib/query/hooks";
+import { useJobsSummary, useTimeline } from "../../lib/query/hooks";
 import { useLiveToggle } from "../../lib/live/useLiveToggle";
 import { useMemo, useState } from "react";
 import { TimelineList } from "../../components/timeline/TimelineList";
@@ -15,6 +15,8 @@ export default function MissionPage() {
   const timeline = useTimeline({ limit: 50, from: new Date(Date.now() - 60 * 60 * 1000).toISOString() });
   const items = useMemo(() => timeline.data?.pages.flatMap((p) => p.items) ?? [], [timeline.data]);
   const trust = useTrust();
+  const jobs = useJobsSummary();
+  const jobCounts = jobs.data?.counts ?? {};
 
   return (
     <AppShell>
@@ -35,6 +37,11 @@ export default function MissionPage() {
               >
                 Jump to Live
               </button>
+              <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-muted-foreground">
+                <span>Jobs</span>
+                <span className="rounded-full bg-white/10 px-2 py-1">q:{jobCounts.queued ?? 0}</span>
+                <span className="rounded-full bg-white/10 px-2 py-1">r:{jobCounts.running ?? 0}</span>
+              </div>
               <label className="flex items-center gap-1 text-xs text-muted-foreground">
                 <input type="checkbox" checked={autoPause} onChange={(e) => setAutoPause(e.target.checked)} />
                 Auto-pause on scroll

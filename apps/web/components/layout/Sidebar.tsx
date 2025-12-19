@@ -2,13 +2,14 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { cn } from "../../lib/utils";
-import { LayoutGrid, Clock, ShieldCheck, Settings, History, Activity } from "lucide-react";
+import { LayoutGrid, Clock, ShieldCheck, Settings, History, Activity, ListChecks } from "lucide-react";
 import { loadAuthSettings } from "../../lib/settings/authSettings";
 
 const links = [
   { href: "/", label: "Overview", icon: LayoutGrid, roles: ["member", "admin", "public"] },
   { href: "/timeline", label: "Timeline", icon: History, roles: ["member", "admin"] },
   { href: "/decisions", label: "Decisions", icon: Clock, roles: ["member", "admin"] },
+  { href: "/jobs", label: "Jobs", icon: ListChecks, roles: ["member", "admin"] },
   { href: "/trust", label: "Trust", icon: ShieldCheck, roles: ["admin"] },
   { href: "/settings", label: "Settings", icon: Settings, roles: ["member", "admin", "public"] },
 ];

@@ -77,4 +77,19 @@ describe("timeline helpers", () => {
     expect(res.kind).toBe("other");
     expect(((res.payload as any).outputSafe as string).length).toBeLessThan(long.length);
   });
+
+  it("derives outputSafe even when raw output is present", () => {
+    const long = "y".repeat(3000);
+    const evt: DomainEvent = {
+      id: "2",
+      aggregateId: "agg",
+      type: "tool.echoed",
+      timestamp: new Date().toISOString(),
+      payload: { jobId: "job-x", output: long },
+      meta: { actor: { userId: "u" }, source: "system", decisionId: "dec-2", tenantId: "t1" },
+    };
+    const res = sanitizeEventForTimeline(evt);
+    expect(res.kind).toBe("other");
+    expect(((res.payload as any).outputSafe as string).length).toBeLessThan(long.length);
+  });
 });

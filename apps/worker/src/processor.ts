@@ -28,13 +28,13 @@ export type ProcessorDeps = {
 const safeSummary = (v: any, max = 180) => {
   if (v === null || v === undefined) return "";
   const s = typeof v === "string" ? v : JSON.stringify(v);
-  return s.length > max ? `${s.slice(0, max)}…` : s;
+  return s.length > max ? `${s.slice(0, max)}...` : s;
 };
 
 const truncate = (val: any, max = 4096) => {
   const s = typeof val === "string" ? val : JSON.stringify(val);
   if (s.length <= max) return s;
-  return s.slice(0, max) + "…";
+  return s.slice(0, max) + "...";
 };
 
 export async function processJobOnce(tenantId: string, jobId: string, deps: ProcessorDeps): Promise<void> {
@@ -48,34 +48,42 @@ export async function processJobOnce(tenantId: string, jobId: string, deps: Proc
   const actor = (job.input as any)?.actor ?? { userId: job.lockedBy ?? "worker" };
   const risk = (job.input as any)?.risk;
   const riskReasons = (job.input as any)?.riskReasons;
+  const correlationId = job.correlationId ?? job.decisionId ?? jobId;
+  const decisionId = job.decisionId ?? jobId;
 
-  const canceled = await queue.isCanceled(jobId);
-  if (canceled) {
-    const canceledJob = await repo.updateStatus(tenantId, jobId, { status: "canceled", lockedAt: null, lockedBy: null });
+  const emit = async (type: string, payload: Record<string, unknown>) => {
     await deps.appendEvent({
       id: randomUUID(),
-      aggregateId: job.decisionId ?? jobId,
-      type: "job.canceled",
+      aggregateId: decisionId,
+      type,
       timestamp: new Date().toISOString(),
       payload: {
         jobId,
         jobType: job.type,
-        status: "canceled",
-        attempts: job.attempts,
+        status: payload.status ?? job.status,
+        attempts: payload.attempts ?? job.attempts,
         maxAttempts: job.maxAttempts,
-        runAt: job.runAt,
+        runAt: payload.runAt ?? job.runAt,
         domain: perm.domain,
         action: perm.action,
-        summarySafe: "Job cancelado",
+        summarySafe: payload.summarySafe ?? safeSummary(job.type),
+        errorSafe: payload.errorSafe,
+        outputSafe: payload.outputSafe,
       },
       meta: {
-        actor: { userId: "system" },
+        actor: { userId: "worker" },
         source: "system",
-        decisionId: job.decisionId ?? jobId,
-        correlationId: job.correlationId ?? job.decisionId ?? jobId,
+        decisionId,
+        correlationId,
         tenantId,
       },
     });
+  };
+
+  const canceled = await queue.isCanceled(jobId);
+  if (canceled) {
+    await repo.updateStatus(tenantId, jobId, { status: "canceled", lockedAt: null, lockedBy: null });
+    await emit("job.canceled", { status: "canceled", summarySafe: "Job cancelado" });
     return;
   }
 
@@ -83,57 +91,63 @@ export async function processJobOnce(tenantId: string, jobId: string, deps: Proc
     actor,
     domain: perm.domain,
     action: perm.action,
-    decisionId: job.decisionId ?? jobId,
-    correlationId: job.correlationId ?? job.decisionId ?? jobId,
+    decisionId,
+    correlationId,
     context: {},
     risk,
     riskReasons,
+    tenantId,
   });
-  const decision = evaluation.decision.decision;
-  if (decision === "deny" || decision === "requires_approval") {
-    const code = decision === "deny" ? "permission_denied" : "requires_approval";
+  const decision = evaluation.decision;
+  if (decision.level === "deny") {
     await repo.updateStatus(tenantId, jobId, {
       status: "failed",
       attempts: job.attempts + 1,
-      error: { code, message: code },
+      error: { code: "permission_denied", message: decision.reason },
       lockedAt: null,
       lockedBy: null,
     });
-    await deps.appendEvent({
-      id: randomUUID(),
-      aggregateId: job.decisionId ?? jobId,
-      type: "job.failed",
-      timestamp: new Date().toISOString(),
-      payload: {
-        jobId,
-        jobType: job.type,
-        status: "failed",
-        attempts: job.attempts + 1,
-        maxAttempts: job.maxAttempts,
-        runAt: job.runAt,
-        domain: perm.domain,
-        action: perm.action,
-        summarySafe: code === "requires_approval" ? "Aguardando aprovação" : "Permissão negada",
-        errorSafe: { code, message: code },
-      },
-      meta: {
-        actor: { userId: "worker" },
-        source: "system",
-        decisionId: job.decisionId ?? jobId,
-        correlationId: job.correlationId ?? job.decisionId ?? jobId,
-        tenantId,
-      },
+    await emit("job.failed", {
+      status: "failed",
+      attempts: job.attempts + 1,
+      summarySafe: "Permissao negada",
+      errorSafe: { code: "permission_denied", message: decision.reason },
     });
     return;
   }
+  if (decision.requiresApproval && !decision.allowed) {
+    await repo.updateStatus(tenantId, jobId, {
+      status: "failed",
+      attempts: job.attempts + 1,
+      error: { code: "requires_approval", message: decision.reason },
+      lockedAt: null,
+      lockedBy: null,
+    });
+    await emit("job.failed", {
+      status: "failed",
+      attempts: job.attempts + 1,
+      summarySafe: "Requer aprovacao",
+      errorSafe: { code: "requires_approval", message: decision.reason },
+    });
+    return;
+  }
+
+  await emit("job.started", { status: "running", attempts: job.attempts + 1, summarySafe: "Job iniciado" });
 
   const tool = getTool(job.type);
   if (!tool) {
     await repo.updateStatus(tenantId, jobId, {
       status: "dead_letter",
+      attempts: job.attempts + 1,
       error: { code: "unknown_tool", message: "Unknown tool" },
       lockedAt: null,
       lockedBy: null,
+    });
+    await emit("job.dead_letter", {
+      status: "dead_letter",
+      attempts: job.attempts + 1,
+      summarySafe: "Tool desconhecida",
+      errorSafe: { code: "unknown_tool", message: "Unknown tool" },
     });
     return;
   }
@@ -158,34 +172,16 @@ export async function processJobOnce(tenantId: string, jobId: string, deps: Proc
       etag: randomUUID(),
       domain: perm.domain,
     });
-    await deps.appendEvent({
-      id: randomUUID(),
-      aggregateId: job.decisionId ?? jobId,
-      type: "job.succeeded",
-      timestamp: new Date().toISOString(),
-      payload: {
-        jobId,
-        jobType: job.type,
-        status: "succeeded",
-        attempts: job.attempts + 1,
-        maxAttempts: job.maxAttempts,
-        runAt: job.runAt,
-        domain: perm.domain,
-        action: perm.action,
-        summarySafe: "Job concluído",
-        outputSafe: truncate(result.output),
-      },
-      meta: {
-        actor: { userId: "worker" },
-        source: "system",
-        decisionId: job.decisionId ?? jobId,
-        correlationId: job.correlationId ?? job.decisionId ?? jobId,
-        tenantId,
-      },
+    await emit("job.succeeded", {
+      status: "succeeded",
+      attempts: job.attempts + 1,
+      summarySafe: "Job concluido",
+      outputSafe: truncate(result.output),
     });
   } catch (err: any) {
     const attempts = job.attempts + 1;
-    if (attempts >= job.maxAttempts) {
+    const maxAttempts = job.maxAttempts ?? deps.maxAttempts;
+    if (attempts >= maxAttempts) {
       await repo.updateStatus(tenantId, jobId, {
         status: "dead_letter",
         attempts,
@@ -193,30 +189,11 @@ export async function processJobOnce(tenantId: string, jobId: string, deps: Proc
         lockedAt: null,
         lockedBy: null,
       });
-      await deps.appendEvent({
-        id: randomUUID(),
-        aggregateId: job.decisionId ?? jobId,
-        type: "job.dead_letter",
-        timestamp: new Date().toISOString(),
-        payload: {
-          jobId,
-          jobType: job.type,
-          status: "dead_letter",
-          attempts,
-          maxAttempts: job.maxAttempts,
-          runAt: job.runAt,
-          domain: perm.domain,
-          action: perm.action,
-          summarySafe: "Job em dead-letter",
-          errorSafe: { message: safeSummary(err?.message ?? "error") },
-        },
-        meta: {
-          actor: { userId: "worker" },
-          source: "system",
-          decisionId: job.decisionId ?? jobId,
-          correlationId: job.correlationId ?? job.decisionId ?? jobId,
-          tenantId,
-        },
+      await emit("job.dead_letter", {
+        status: "dead_letter",
+        attempts,
+        summarySafe: "Job em dead-letter",
+        errorSafe: { code: "max_attempts", message: safeSummary(err?.message ?? "error") },
       });
     } else {
       const next = Math.min(Math.pow(2, attempts) * backoffMs, 5 * 60 * 1000);
@@ -230,30 +207,12 @@ export async function processJobOnce(tenantId: string, jobId: string, deps: Proc
         lockedBy: null,
       });
       await queue.enqueue({ ...job, status: "queued", attempts, runAt: nextRun } as JobRecord);
-      await deps.appendEvent({
-        id: randomUUID(),
-        aggregateId: job.decisionId ?? jobId,
-        type: "job.retried",
-        timestamp: new Date().toISOString(),
-        payload: {
-          jobId,
-          jobType: job.type,
-          status: "queued",
-          attempts,
-          maxAttempts: job.maxAttempts,
-          runAt: nextRun,
-          domain: perm.domain,
-          action: perm.action,
-          summarySafe: "Job reencaminhado",
-          errorSafe: { message: safeSummary(err?.message ?? "retry") },
-        },
-        meta: {
-          actor: { userId: "worker" },
-          source: "system",
-          decisionId: job.decisionId ?? jobId,
-          correlationId: job.correlationId ?? job.decisionId ?? jobId,
-          tenantId,
-        },
+      await emit("job.retried", {
+        status: "queued",
+        attempts,
+        runAt: nextRun,
+        summarySafe: "Job reencaminhado",
+        errorSafe: { code: "retry", message: safeSummary(err?.message ?? "retry") },
       });
     }
   }

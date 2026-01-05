@@ -55,6 +55,17 @@ export class InMemoryJobRepository {
     return job && job.tenantId === tenantId ? job : null;
   }
 
+  async findLatestByDecision(tenantId: string, decisionId: string, statuses?: JobStatus[]): Promise<JobRecord | null> {
+    const candidates = Array.from(this.jobs.values())
+      .filter((job) => job.tenantId === tenantId && job.decisionId === decisionId)
+      .filter((job) => {
+        if (!statuses || statuses.length === 0) return true;
+        return statuses.includes(job.status);
+      })
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    return candidates[0] ?? null;
+  }
+
   async listJobs(
     tenantId: string,
     filters: {
@@ -106,6 +117,10 @@ export class InMemoryJobRepository {
   async updateStatus(tenantId: string, jobId: string, patch: JobUpdatePatch): Promise<JobRecord | null> {
     const existing = await this.getJob(tenantId, jobId);
     if (!existing) return null;
+    const terminalStatuses: JobStatus[] = ["succeeded", "failed", "dead_letter"];
+    if (patch.status && terminalStatuses.includes(patch.status) && !["queued", "running"].includes(existing.status)) {
+      return existing;
+    }
     const updated: JobRecord = {
       ...existing,
       ...patch,
@@ -138,5 +153,23 @@ export class InMemoryJobRepository {
     };
     this.jobs.set(jobId, updated);
     return updated;
+  }
+
+  async findStaleRunning(tenantId: string, staleMs: number, limit = 20): Promise<JobRecord[]> {
+    const cutoff = Date.now() - staleMs;
+    return Array.from(this.jobs.values())
+      .filter((job) => job.tenantId === tenantId && job.status === "running" && job.lockedAt && Date.parse(job.lockedAt) < cutoff)
+      .sort((a, b) => Date.parse(a.lockedAt ?? "") - Date.parse(b.lockedAt ?? ""))
+      .slice(0, limit);
+  }
+
+  async countByStatus(tenantId: string): Promise<Record<string, number>> {
+    const counts: Record<string, number> = {};
+    Array.from(this.jobs.values())
+      .filter((j) => j.tenantId === tenantId)
+      .forEach((j) => {
+        counts[j.status] = (counts[j.status] ?? 0) + 1;
+      });
+    return counts;
   }
 }

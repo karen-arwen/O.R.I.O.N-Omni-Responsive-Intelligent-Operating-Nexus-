@@ -22,6 +22,7 @@ async function main() {
     return;
   }
 
+  log(`connecting ${url}`);
   const client = new Client({ connectionString: url });
   await client.connect();
   await ensureSchemaTable(client);
@@ -40,7 +41,7 @@ async function main() {
       continue;
     }
     const sql = readFileSync(join(migrationsDir, file), "utf-8");
-    log(`apply ${version}`);
+    log(`applying ${file}`);
     await client.query("BEGIN");
     try {
       await client.query(sql);

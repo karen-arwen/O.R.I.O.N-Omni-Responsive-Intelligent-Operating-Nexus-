@@ -1,7 +1,8 @@
 version: "3.9"
+
 services:
   postgres:
-    image: postgres:15
+    image: postgres:16
     environment:
       POSTGRES_PASSWORD: orion
       POSTGRES_USER: orion
@@ -11,13 +12,13 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U orion"]
+      test: ["CMD-SHELL", "pg_isready -U orion -d orion"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   redis:
-    image: redis:7
+    image: redis:7-alpine
     ports:
       - "6379:6379"
     healthcheck:
@@ -35,7 +36,7 @@ services:
     environment:
       ORION_API_PORT: 3000
       ORION_STORAGE_PATH: /app/data/events.json
-      ORION_ALLOWED_ORIGINS: "*"
+      ORION_ALLOWED_ORIGINS: http://localhost:3001
       ORION_DEV_AUTH_BYPASS: "true"
       ORION_DB_URL: postgres://orion:orion@postgres:5432/orion
       ORION_REDIS_URL: redis://redis:6379
@@ -50,6 +51,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+
   worker:
     image: node:20
     working_dir: /app
@@ -58,11 +65,25 @@ services:
       ORION_DB_URL: postgres://orion:orion@postgres:5432/orion
       ORION_REDIS_URL: redis://redis:6379
       ORION_WORKER_CONCURRENCY: 4
+      ORION_EVENTSTORE_ADAPTER: postgres
+      ORION_RATE_LIMIT_BACKEND: redis
+      ORION_CACHE_ENABLED: "true"
+      ORION_DEV_AUTH_BYPASS: "true"
     volumes:
       - .:/app
     depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
       api:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "ps -ef | grep \"dev:worker\" | grep -v grep"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
   web:
     image: node:20
     working_dir: /app
@@ -74,7 +95,8 @@ services:
     volumes:
       - .:/app
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   pgdata:

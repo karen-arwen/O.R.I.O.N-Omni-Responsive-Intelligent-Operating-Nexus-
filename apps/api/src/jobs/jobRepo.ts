@@ -2,7 +2,7 @@ import { Pool } from "pg";
 import { randomUUID } from "crypto";
 import { JobCreateInput, JobRecord, JobStatus, JobUpdatePatch, jobTypeToPermission } from "../../../../packages/shared/src/jobs";
 
-const statusOrder: JobStatus[] = ["queued", "running", "succeeded", "failed", "canceled", "dead_letter"];
+const statusOrder: JobStatus[] = ["queued", "running", "awaiting_approval", "succeeded", "failed", "canceled", "dead_letter"];
 
 const normalizeDate = (v?: string | Date) => (v ? new Date(v).toISOString() : new Date().toISOString());
 
@@ -97,6 +97,20 @@ export class JobRepository {
     return res.rowCount ? this.mapRow(res.rows[0]) : null;
   }
 
+  async findLatestByDecision(tenantId: string, decisionId: string, statuses?: JobStatus[]): Promise<JobRecord | null> {
+    const values: any[] = [tenantId, decisionId];
+    let where = "tenant_id=$1 AND decision_id=$2";
+    if (statuses && statuses.length > 0) {
+      values.push(statuses);
+      where += ` AND status = ANY($${values.length})`;
+    }
+    const res = await this.pool.query(
+      `SELECT * FROM jobs WHERE ${where} ORDER BY updated_at DESC, created_at DESC LIMIT 1`,
+      values
+    );
+    return res.rowCount ? this.mapRow(res.rows[0]) : null;
+  }
+
   async listJobs(
     tenantId: string,
     filters: {
@@ -177,10 +191,13 @@ export class JobRepository {
     if (fields.length === 0) {
       return this.getJob(tenantId, jobId);
     }
+    const terminalStatuses: JobStatus[] = ["succeeded", "failed", "dead_letter"];
+    const guardTerminal = patch.status && terminalStatuses.includes(patch.status);
     values.push(now, tenantId, jobId);
     const sql = `
       UPDATE jobs SET ${fields.join(", ")}, updated_at=$${values.length - 2}
       WHERE tenant_id=$${values.length - 1} AND id=$${values.length}
+      ${guardTerminal ? "AND status IN ('queued','running')" : ""}
       RETURNING *
     `;
     const res = await this.pool.query(sql, values);
@@ -199,5 +216,30 @@ export class JobRepository {
       [now, workerId, tenantId, jobId]
     );
     return res.rowCount ? this.mapRow(res.rows[0]) : null;
+  }
+
+  async findStaleRunning(tenantId: string, staleMs: number, limit = 20): Promise<JobRecord[]> {
+    const threshold = new Date(Date.now() - staleMs).toISOString();
+    const res = await this.pool.query(
+      `
+      SELECT * FROM jobs
+      WHERE tenant_id=$1 AND status='running' AND locked_at IS NOT NULL AND locked_at < $2
+      ORDER BY locked_at ASC
+      LIMIT $3
+    `,
+      [tenantId, threshold, limit]
+    );
+    return res.rows.map((r: any) => this.mapRow(r));
+  }
+
+  async countByStatus(tenantId: string): Promise<Record<string, number>> {
+    const res = await this.pool.query(`SELECT status, count(*)::int AS c FROM jobs WHERE tenant_id=$1 GROUP BY status`, [
+      tenantId,
+    ]);
+    const counts: Record<string, number> = {};
+    res.rows.forEach((r: any) => {
+      counts[r.status] = Number(r.c);
+    });
+    return counts;
   }
 }

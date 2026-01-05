@@ -13,6 +13,7 @@ export type EventMeta = {
   correlationId?: string;
   causationId?: string;
   decisionId?: string;
+  idempotencyKey?: string;
   phase?: string;
   description?: string;
   tenantId?: string;

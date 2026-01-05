@@ -4,8 +4,9 @@ import { Command } from "cmdk";
 import { useEffect, useState, KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Zap } from "lucide-react";
-import { useExecuteDecision } from "../../lib/query/hooks";
+import { useApproveDecision, useApproveJob, useExecuteDecision } from "../../lib/query/hooks";
 import { toast } from "../ui/Toast";
+import { loadAuthSettings } from "../../lib/settings/authSettings";
 
 const recentKey = "orion-recent-decisions";
 
@@ -26,6 +27,10 @@ export function CommandPalette() {
   const [value, setValue] = useState("");
   const [recent, setRecent] = useState<string[]>([]);
   const executeDecision = useExecuteDecision();
+  const approveDecision = useApproveDecision();
+  const approveJob = useApproveJob();
+  const auth = loadAuthSettings();
+  const isAdmin = (auth.roles ?? []).map((r) => r.toLowerCase()).includes("admin");
 
   useEffect(() => {
     const handler = () => setOpen(true);
@@ -73,8 +78,23 @@ export function CommandPalette() {
         .mutateAsync(parts[1])
         .then((res) => toast.success(`Job ${res.jobId} criado`))
         .catch((err: any) => toast.error(err?.message ?? "Falha ao executar"));
-    }
-    else if (cmd === "toggle" && parts[1] === "live") {
+    } else if (cmd === "approve") {
+      if (!isAdmin) {
+        toast.error("Access denied");
+        return;
+      }
+      if (parts[1] === "decision" && parts[2]) {
+        approveDecision
+          .mutateAsync({ decisionId: parts[2] })
+          .then(() => toast.success("Aprovado"))
+          .catch((err: any) => toast.error(err?.message ?? "Falha ao aprovar"));
+      } else if (parts[1] === "job" && parts[2]) {
+        approveJob
+          .mutateAsync({ jobId: parts[2] })
+          .then(() => toast.success("Job aprovado"))
+          .catch((err: any) => toast.error(err?.message ?? "Falha ao aprovar job"));
+      }
+    } else if (cmd === "toggle" && parts[1] === "live") {
       const event = new CustomEvent("toggle-live");
       window.dispatchEvent(event);
     } else if (cmd === "toggle" && parts[1] === "hud") {

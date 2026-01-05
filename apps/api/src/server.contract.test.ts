@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildServer } from "./server";
 import { InMemoryEventStore } from "../../../packages/event-store/src";
 import { AuditLogger } from "../../../packages/audit/src";
@@ -19,6 +19,10 @@ describe("API contracts / hardening", () => {
     ]);
     const trust = new TrustService({ eventStore: store });
     server = buildServer({ eventStore: store, auditLogger: audit, permissionEngine: permissions, trustService: trust });
+  });
+
+  afterEach(async () => {
+    await server.close();
   });
 
   it("serves health and metrics", async () => {
@@ -122,6 +126,7 @@ describe("API contracts / hardening", () => {
     const second = await limited.inject({ method: "GET", url: "/health" });
     expect(second.statusCode).toBe(429);
     expect(second.json().error.code).toBe("rate_limited");
+    await limited.close();
   });
 
   it("isolates tenants on timeline", async () => {
@@ -183,5 +188,6 @@ describe("API contracts / hardening", () => {
     });
     expect(ok.statusCode).toBe(200);
     expect(ok.json().items).toEqual([]);
+    await authServer.close();
   });
 });

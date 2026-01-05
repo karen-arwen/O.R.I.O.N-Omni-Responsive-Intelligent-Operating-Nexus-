@@ -42,6 +42,7 @@ test.beforeEach(async ({ page }) => {
       payload: {},
     },
   ];
+  let jobAwaitStatus = "awaiting_approval";
   const jobs = [
     {
       id: "job-1",
@@ -66,6 +67,29 @@ test.beforeEach(async ({ page }) => {
       traceEventIds: null,
       etag: null,
     },
+    {
+      id: "job-await",
+      tenantId: "local",
+      createdAt: now,
+      updatedAt: now,
+      decisionId: "dec-await",
+      correlationId: "corr-await",
+      domain: "tasks",
+      type: "tool.create_note",
+      status: () => jobAwaitStatus,
+      priority: 0,
+      attempts: 0,
+      maxAttempts: 2,
+      runAt: now,
+      lockedAt: null,
+      lockedBy: null,
+      idempotencyKey: null,
+      input: {},
+      output: null,
+      error: null,
+      traceEventIds: null,
+      etag: null,
+    } as any,
   ];
 
   await page.route("**/health", (route) =>
@@ -78,6 +102,28 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/timeline**", (route) => {
     if (route.request().resourceType() !== "fetch" && route.request().resourceType() !== "xhr") return route.continue();
     const url = new URL(route.request().url());
+    const jobId = url.searchParams.get("jobId");
+    if (jobId) {
+      return route.fulfill({
+        json: {
+          items: [
+            {
+              id: "job-event-1",
+              type: "job.started",
+              timestamp: now,
+              decisionId: "dec-123",
+              correlationId: "corr-1",
+              domain: "tasks",
+              kind: "system",
+              summary: "Job iniciado",
+              payload: { jobId, status: "running" },
+            },
+          ],
+          nextCursor: null,
+          capabilities: { canExecute: false, v: "v0" },
+        },
+      });
+    }
     const cursor = url.searchParams.get("cursor");
     if (cursor) {
       return route.fulfill({
@@ -100,6 +146,18 @@ test.beforeEach(async ({ page }) => {
       },
     })
   );
+  await page.route("**/decisions/dec-await/snapshot", (route) =>
+    route.fulfill({
+      json: {
+        decisionId: "dec-await",
+        correlationId: "corr-await",
+        snapshot: { intent: { type: "tasks.create", domain: "tasks", action: "create" }, mode: "ready_to_execute" },
+        events: [],
+        capabilities: { canExecute: false, v: "v0" },
+        etag: "etag-await",
+      },
+    })
+  );
   await page.route("**/decisions/dec-123/feedback", (route) => {
     if (route.request().resourceType() !== "fetch" && route.request().resourceType() !== "xhr") return route.continue();
     return route.fulfill({
@@ -115,11 +173,22 @@ test.beforeEach(async ({ page }) => {
   });
   await page.route("**/jobs?**", (route) => {
     if (route.request().resourceType() !== "fetch" && route.request().resourceType() !== "xhr") return route.continue();
-    return route.fulfill({ json: { jobs, nextCursor: null } });
+    const hydrated = jobs.map((j: any) => ({ ...j, status: typeof j.status === "function" ? j.status() : j.status }));
+    return route.fulfill({ json: { jobs: hydrated, nextCursor: null } });
   });
   await page.route("**/jobs/job-1", (route) => {
     if (route.request().resourceType() !== "fetch" && route.request().resourceType() !== "xhr") return route.continue();
     return route.fulfill({ json: { job: jobs[0] } });
+  });
+  await page.route("**/jobs/job-await", (route) => {
+    if (route.request().resourceType() !== "fetch" && route.request().resourceType() !== "xhr") return route.continue();
+    return route.fulfill({ json: { job: { ...(jobs[1] as any), status: jobAwaitStatus } } });
+  });
+  await page.route("**/decisions/dec-await/approve", (route) => {
+    jobAwaitStatus = "queued";
+    return route.fulfill({
+      json: { decisionId: "dec-await", jobId: "job-await", status: "queued", capabilities: { canExecute: false, v: "v0" } },
+    });
   });
 });
 
@@ -161,5 +230,15 @@ test("jobs list and detail render", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Jobs" })).toBeVisible();
   await page.getByText("job-1").click();
   await expect(page.getByText("Job job-1")).toBeVisible();
-  await expect(page.getByText("Timeline do job")).toBeVisible();
+  await expect(page.getByText("Run Log")).toBeVisible();
+});
+
+test("approval flow surfaces awaiting job and requeues after approval", async ({ page }) => {
+  await page.goto("/decisions/dec-await");
+  await expect(page.getByText("awaiting_approval")).toBeVisible();
+  await page.getByRole("button", { name: "Approve" }).click();
+  await expect(page.getByText("awaiting_approval")).not.toBeVisible();
+
+  await page.goto("/jobs/job-await");
+  await expect(page.getByText("queued")).toBeVisible();
 });

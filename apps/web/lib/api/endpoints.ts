@@ -145,3 +145,30 @@ export const executeDecision = async (decisionId: string) => {
     })
     .parse(json);
 };
+
+export const approveDecision = async (decisionId: string, reason?: string) => {
+  const res = await apiFetch(`/decisions/${decisionId}/approve`, { method: "POST", body: JSON.stringify({ reason }) });
+  const json = await res.json();
+  return z
+    .object({
+      decisionId: z.string(),
+      jobId: z.string().optional(),
+      status: z.string(),
+      capabilities: z.object({ canExecute: z.boolean(), v: z.string() }),
+    })
+    .parse(json);
+};
+
+export const approveJob = async (jobId: string, reason?: string) => {
+  const res = await apiFetch(`/jobs/${jobId}/approve`, { method: "POST", body: JSON.stringify({ reason }) });
+  const json = await res.json();
+  return z
+    .object({
+      jobId: z.string(),
+      decisionId: z.string().optional(),
+      status: z.string(),
+      capabilities: z.object({ canExecute: z.boolean(), v: z.string() }).optional(),
+      note: z.string().optional(),
+    })
+    .parse(json);
+};

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildServer } from "./server";
 import { InMemoryEventStore } from "../../../packages/event-store/src";
 import { AuditLogger } from "../../../packages/audit/src";
@@ -14,6 +14,10 @@ describe("API server", () => {
   beforeEach(async () => {
     store = new InMemoryEventStore();
     server = buildServer({ eventStore: store, trustService: new TrustService() });
+  });
+
+  afterEach(async () => {
+    await server.close();
   });
 
   it("appends and queries events", async () => {

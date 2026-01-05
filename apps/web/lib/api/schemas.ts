@@ -54,7 +54,7 @@ export const jobSchema = z.object({
   correlationId: z.string().nullable().optional(),
   domain: z.string().nullable().optional(),
   type: z.string(),
-  status: z.enum(["queued", "running", "succeeded", "failed", "canceled", "dead_letter"]),
+  status: z.enum(["queued", "running", "succeeded", "failed", "canceled", "dead_letter", "awaiting_approval"]),
   priority: z.number(),
   attempts: z.number(),
   maxAttempts: z.number(),

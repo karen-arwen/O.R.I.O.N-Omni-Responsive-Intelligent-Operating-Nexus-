@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { buildServer } from "./server";
 import { InMemoryEventStore } from "../../../packages/event-store/src";
 import { AuditLogger } from "../../../packages/audit/src";
@@ -7,8 +7,17 @@ import { Planner } from "../../../packages/planner/src/planner";
 import { TrustService } from "../../../packages/trust/src";
 
 describe("Timeline API", () => {
+  let server: ReturnType<typeof buildServer> | null = null;
+
+  afterEach(async () => {
+    if (server) {
+      await server.close();
+      server = null;
+    }
+  });
+
   it("returns 400 when no filters", async () => {
-    const server = buildServer({ eventStore: new InMemoryEventStore() });
+    server = buildServer({ eventStore: new InMemoryEventStore() });
     const res = await server.inject({ method: "GET", url: "/timeline" });
     expect(res.statusCode).toBe(400);
   });
@@ -21,7 +30,7 @@ describe("Timeline API", () => {
     ]);
     const trust = new TrustService({ eventStore: store });
     const planner = new Planner({ eventStore: store, audit, permissions, trust });
-    const server = buildServer({ eventStore: store, auditLogger: audit, permissionEngine: permissions, trustService: trust });
+    server = buildServer({ eventStore: store, auditLogger: audit, permissionEngine: permissions, trustService: trust });
 
     await planner.decide({
       intent: { type: "tasks.create", domain: "tasks", action: "create" },

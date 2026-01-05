@@ -13,6 +13,7 @@ export type TimelineKind = (typeof KINDS)[keyof typeof KINDS];
 
 const mapKind = (event: DomainEvent): TimelineKind => {
   if (event.type.startsWith("job.")) return KINDS.SYSTEM;
+  if (event.type.startsWith("worker.")) return KINDS.SYSTEM;
   if (event.type.startsWith("tool.")) return KINDS.OTHER;
   if (
     [
@@ -20,6 +21,8 @@ const mapKind = (event: DomainEvent): TimelineKind => {
       "decision.optioned",
       "decision.suggested",
       "decision.ready_to_execute",
+      "decision.awaiting_approval",
+      "decision.approved",
       "system.no_action",
       "decision.accepted",
       "decision.rejected",
@@ -163,10 +166,14 @@ export const sanitizeEventForTimeline = (event: DomainEvent) => {
           ? "Job criado"
           : event.type === "job.queued"
           ? "Job enfileirado"
+          : event.type === "job.awaiting_approval"
+          ? "Job aguardando aprovacao"
+          : event.type === "job.approved"
+          ? "Job aprovado"
           : event.type === "job.started"
           ? "Job iniciado"
           : event.type === "job.succeeded"
-          ? "Job concluído"
+          ? "Job concluido"
           : event.type === "job.failed"
           ? "Job falhou"
           : event.type === "job.retried"
@@ -175,7 +182,23 @@ export const sanitizeEventForTimeline = (event: DomainEvent) => {
           ? "Job em dead-letter"
           : event.type === "job.canceled"
           ? "Job cancelado"
+          : event.type === "job.recovered"
+          ? "Job recuperado (stale lock)"
+          : event.type === "job.lock_renew_failed"
+          ? "Falha ao renovar lock"
+          : event.type === "job.duplicate_suppressed"
+          ? "Evento duplicado evitado"
           : "Evento de sistema";
+    } else if (event.type.startsWith("worker.")) {
+      const payloadAny: any = event.payload ?? {};
+      payload = {
+        workerId: payloadAny?.workerId,
+        ts: payloadAny?.ts,
+        queueDepth: payloadAny?.queueDepth,
+        runningCount: payloadAny?.runningCount,
+        activeTenantsCount: payloadAny?.activeTenantsCount,
+      };
+      summary = "Worker heartbeat";
     } else {
       payload = sanitizeSystemPayload(event);
       summary = "Evento de sistema";
@@ -203,7 +226,12 @@ export const sanitizeEventForTimeline = (event: DomainEvent) => {
         : "Tool";
   } else {
     payload = sanitizeGenericPayload(event);
-    summary = "Evento";
+    summary =
+      event.type === "decision.awaiting_approval"
+        ? "Decisão aguarda aprovação"
+        : event.type === "decision.approved"
+        ? "Decisão aprovada"
+        : "Evento";
   }
 
   return {
@@ -219,6 +247,10 @@ export const sanitizeEventForTimeline = (event: DomainEvent) => {
           ? "Decisão sugerida"
           : event.type === "decision.ready_to_execute"
           ? "Decisão pronta (sinalização)"
+          : event.type === "decision.awaiting_approval"
+          ? "Decisão aguarda aprovação"
+          : event.type === "decision.approved"
+          ? "Decisão aprovada"
           : event.type === "system.no_action"
           ? "Sem ação (silêncio)"
           : event.type === "decision.accepted"

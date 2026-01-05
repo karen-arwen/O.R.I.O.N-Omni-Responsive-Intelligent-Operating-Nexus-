@@ -7,11 +7,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../..
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Skeleton } from "../../components/ui/Skeleton";
-import { useJobs } from "../../lib/query/hooks";
+import { useApproveJob, useJobs } from "../../lib/query/hooks";
 import { Input } from "../../components/ui/Input";
 import { toast } from "../../components/ui/Toast";
+import { loadAuthSettings } from "../../lib/settings/authSettings";
 
-const statusOptions = ["queued", "running", "succeeded", "failed", "canceled", "dead_letter"];
+const statusOptions = ["queued", "running", "awaiting_approval", "succeeded", "failed", "canceled", "dead_letter"];
 
 export default function JobsPage() {
   const [filters, setFilters] = useState({ status: "", decisionId: "", correlationId: "", domain: "" });
@@ -22,6 +23,9 @@ export default function JobsPage() {
     domain: filters.domain || undefined,
     limit: 20,
   });
+  const approve = useApproveJob();
+  const auth = loadAuthSettings();
+  const isAdmin = (auth.roles ?? []).map((r) => r.toLowerCase()).includes("admin");
 
   const items = useMemo(() => jobs.data?.pages.flatMap((p) => p.jobs) ?? [], [jobs.data]);
   const unavailable = jobs.data?.pages?.some((p: any) => p.unavailable) ?? false;
@@ -133,11 +137,32 @@ export default function JobsPage() {
                     decisionId: {job.decisionId ?? "-"} \u00b7 correlationId: {job.correlationId ?? "-"}
                   </p>
                 </div>
-                <div className="text-xs text-muted-foreground text-right space-y-1">
-                  <p>type: {job.type}</p>
-                  <p>
-                    attempts {job.attempts}/{job.maxAttempts} \u00b7 runAt {new Date(job.runAt).toLocaleString()}
-                  </p>
+                <div className="text-xs text-muted-foreground text-right space-y-1 flex flex-col items-end gap-2">
+                  <div>
+                    <p>type: {job.type}</p>
+                    <p>
+                      attempts {job.attempts}/{job.maxAttempts} \u00b7 runAt {new Date(job.runAt).toLocaleString()}
+                    </p>
+                  </div>
+                  {job.status === "awaiting_approval" && (
+                    <div className="flex gap-2">
+                      {isAdmin ? (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={async () => {
+                            await approve.mutateAsync({ jobId: job.id }).then(() => toast.success("Job aprovado"));
+                            jobs.refetch();
+                          }}
+                          disabled={approve.isLoading}
+                        >
+                          Approve
+                        </Button>
+                      ) : (
+                        <span className="text-[11px] text-muted-foreground">Admin approval required</span>
+                      )}
+                    </div>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -169,6 +194,8 @@ const JobStatusBadge = ({ status }: { status: string }) => {
       ? "secondary"
       : status === "running"
       ? "default"
+      : status === "awaiting_approval"
+      ? "warning"
       : status === "failed" || status === "dead_letter"
       ? "destructive"
       : "outline";

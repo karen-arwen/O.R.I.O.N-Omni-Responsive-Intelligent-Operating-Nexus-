@@ -4,7 +4,8 @@ export type JobStatus =
   | "succeeded"
   | "failed"
   | "canceled"
-  | "dead_letter";
+  | "dead_letter"
+  | "awaiting_approval";
 
 export type JobRecord = {
   id: string;

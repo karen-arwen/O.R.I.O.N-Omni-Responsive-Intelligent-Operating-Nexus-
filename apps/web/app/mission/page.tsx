@@ -41,6 +41,7 @@ export default function MissionPage() {
                 <span>Jobs</span>
                 <span className="rounded-full bg-white/10 px-2 py-1">q:{jobCounts.queued ?? 0}</span>
                 <span className="rounded-full bg-white/10 px-2 py-1">r:{jobCounts.running ?? 0}</span>
+                <span className="rounded-full bg-white/10 px-2 py-1">a:{jobCounts.awaiting_approval ?? 0}</span>
               </div>
               <label className="flex items-center gap-1 text-xs text-muted-foreground">
                 <input type="checkbox" checked={autoPause} onChange={(e) => setAutoPause(e.target.checked)} />

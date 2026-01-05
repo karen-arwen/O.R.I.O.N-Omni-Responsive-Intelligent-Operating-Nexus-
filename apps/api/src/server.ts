@@ -104,6 +104,7 @@ type RequestContext = {
 type JobRepoPort = {
   createJob: (tenantId: string, input: any) => Promise<{ job: JobRecord; created: boolean }>;
   getJob: (tenantId: string, jobId: string) => Promise<JobRecord | null>;
+  findLatestByDecision?: (tenantId: string, decisionId: string, statuses?: JobStatus[]) => Promise<JobRecord | null>;
   listJobs: (
     tenantId: string,
     filters: { status?: JobStatus; decisionId?: string; correlationId?: string; domain?: string; type?: string },
@@ -111,6 +112,8 @@ type JobRepoPort = {
     limit?: number
   ) => Promise<{ jobs: JobRecord[]; nextCursor: string | null }>;
   updateStatus: (tenantId: string, jobId: string, patch: Partial<JobRecord>) => Promise<JobRecord | null>;
+  findStaleRunning?: (tenantId: string, staleMs: number, limit?: number) => Promise<JobRecord[]>;
+  countByStatus?: (tenantId: string) => Promise<Record<string, number>>;
 };
 
 type JobQueuePort = {
@@ -211,7 +214,18 @@ export const buildServer = (deps: ServerDeps = {}): FastifyInstance => {
       string,
       { count: number; errors: number; statuses: Record<string, number>; durationsMs: number[] }
     >(),
-    jobs: { queued: 0, running: 0, failed: 0, succeeded: 0, dead_letter: 0 },
+    jobs: {
+      queued: 0,
+      running: 0,
+      failed: 0,
+      succeeded: 0,
+      dead_letter: 0,
+      awaiting_approval: 0,
+      canceled: 0,
+      recovered: 0,
+      lock_renew_failed: 0,
+      duplicate_suppressed: 0,
+    },
   };
   // TODO: replace in-memory limiter with shared backend (e.g., Redis) for multi-instance deploys
   const inMemoryRateLimiter = new Map<string, { count: number; resetAt: number }>();
@@ -414,6 +428,7 @@ export const buildServer = (deps: ServerDeps = {}): FastifyInstance => {
   app.get("/metrics", async (request, reply) => {
     const guard = ensureRole(request, reply, ["admin"]);
     if (guard) return guard;
+    const ctx = (request as any).ctx as RequestContext;
     reply.header("Cache-Control", "no-store");
     const summarized = Array.from(metrics.perRoute.entries()).map(([route, data]) => ({
       route,
@@ -423,13 +438,59 @@ export const buildServer = (deps: ServerDeps = {}): FastifyInstance => {
       p95: percentile(data.durationsMs, 0.95),
       p99: percentile(data.durationsMs, 0.99),
     }));
+    let jobSnapshot = metrics.jobs;
+    if (jobRepo?.countByStatus) {
+      const counts = await jobRepo.countByStatus(ctx.tenantId);
+      jobSnapshot = { ...jobSnapshot, ...counts };
+    }
+    const { store } = scopedDeps(ctx);
+    const recent = await store.query({
+      tenantId: ctx.tenantId,
+      types: ["job.started", "job.succeeded", "job.recovered", "job.lock_renew_failed", "job.duplicate_suppressed"],
+      limit: 200,
+    });
+    const starts = new Map<string, { ts: number; tool?: string }>();
+    const durationsByTool: Record<string, number[]> = {};
+    let recoveries = 0;
+    let lockFails = 0;
+    let duplicates = 0;
+    recent.forEach((evt) => {
+      const payload: any = evt.payload ?? {};
+      if (evt.type === "job.started") {
+        starts.set(payload.jobId ?? evt.aggregateId, { ts: Date.parse(evt.timestamp), tool: payload.jobType });
+      } else if (evt.type === "job.succeeded") {
+        const key = payload.jobId ?? evt.aggregateId;
+        const start = starts.get(key);
+        if (start) {
+          const duration = Date.parse(evt.timestamp) - start.ts;
+          const tool = payload.jobType ?? start.tool ?? "unknown";
+          durationsByTool[tool] = durationsByTool[tool] ?? [];
+          durationsByTool[tool].push(duration);
+        }
+      } else if (evt.type === "job.recovered") {
+        recoveries += 1;
+      } else if (evt.type === "job.lock_renew_failed") {
+        lockFails += 1;
+      } else if (evt.type === "job.duplicate_suppressed") {
+        duplicates += 1;
+      }
+    });
+    const latency = Object.fromEntries(
+      Object.entries(durationsByTool).map(([tool, arr]) => [tool, { p95: percentile(arr, 0.95), p99: percentile(arr, 0.99) }])
+    );
     return reply.send({
       startedAt: new Date(metrics.startTime).toISOString(),
       uptime: process.uptime(),
       requests: metrics.requests,
       errors: metrics.errors,
       routes: summarized,
-      jobs: metrics.jobs,
+      jobs: {
+        ...jobSnapshot,
+        recovered: (jobSnapshot as any).recovered ?? recoveries,
+        lockRenewFailed: lockFails,
+        duplicateSuppressed: duplicates,
+      },
+      tools: latency,
     });
   });
 
@@ -475,9 +536,49 @@ export const buildServer = (deps: ServerDeps = {}): FastifyInstance => {
         decisionId: job.decisionId ?? job.id,
         correlationId: job.correlationId ?? job.decisionId ?? job.id,
         tenantId: ctx.tenantId,
+        idempotencyKey: `${job.id}:${type}`,
       },
     };
     await store.append(event);
+  };
+
+  const emitDecisionEvent = async (
+    ctx: RequestContext,
+    type: string,
+    payload: Record<string, unknown>
+  ) => {
+    const { store } = scopedDeps(ctx);
+    const decisionId = (payload as any)?.decisionId;
+    const correlationId = (payload as any)?.correlationId ?? decisionId;
+    const event: DomainEvent = {
+      id: randomUUID(),
+      aggregateId: decisionId ?? type,
+      type,
+      timestamp: new Date().toISOString(),
+      payload,
+      meta: {
+        actor: ctx.actor ?? { userId: "system" },
+        source: "system",
+        decisionId: decisionId ?? undefined,
+        correlationId: correlationId ?? decisionId,
+        tenantId: ctx.tenantId,
+      },
+    };
+    await store.append(event);
+  };
+
+  const findAwaitingJobByDecision = async (tenantId: string, decisionId: string): Promise<JobRecord | null> => {
+    if (!jobRepo) return null;
+    if (jobRepo.findLatestByDecision) {
+      return jobRepo.findLatestByDecision(tenantId, decisionId, ["awaiting_approval"]);
+    }
+    const { jobs } = await jobRepo.listJobs(
+      tenantId,
+      { decisionId, status: "awaiting_approval" },
+      undefined,
+      20
+    );
+    return jobs.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())[0] ?? null;
   };
 
   app.post("/events", async (request, reply) => {
@@ -713,6 +814,7 @@ export const buildServer = (deps: ServerDeps = {}): FastifyInstance => {
         correlationId: z.string().optional(),
         decisionId: z.string().optional(),
         domain: z.string().optional(),
+        jobId: z.string().optional(),
         types: z.string().optional(),
         kind: z.enum(["decision", "trust", "system", "audit", "other"]).optional(),
         from: z.string().datetime().optional(),
@@ -727,7 +829,7 @@ export const buildServer = (deps: ServerDeps = {}): FastifyInstance => {
     const q = parsed.data;
 
     const limit = q.limit ?? 50;
-    if (!q.correlationId && !q.decisionId && !q.domain && !q.types && !q.from && !q.to) {
+    if (!q.correlationId && !q.decisionId && !q.domain && !q.types && !q.from && !q.to && !q.jobId) {
       return sendError(
         request,
         reply,
@@ -763,6 +865,10 @@ export const buildServer = (deps: ServerDeps = {}): FastifyInstance => {
         if (q.domain) {
           const domain = sanitizeEventForTimeline(evt).domain;
           if (domain !== q.domain) return false;
+        }
+        if (q.jobId) {
+          const payloadJob = (evt.payload as any)?.jobId;
+          if (payloadJob !== q.jobId && evt.aggregateId !== q.jobId) return false;
         }
         return true;
       })
@@ -1005,7 +1111,7 @@ export const buildServer = (deps: ServerDeps = {}): FastifyInstance => {
     if (!jobRepo) return sendError(request, reply, 500, "jobs_unavailable", "Jobs require database backend");
     const parsed = z
       .object({
-        status: z.enum(["queued", "running", "succeeded", "failed", "canceled", "dead_letter"]).optional(),
+        status: z.enum(["queued", "running", "succeeded", "failed", "canceled", "dead_letter", "awaiting_approval"]).optional(),
         decisionId: z.string().optional(),
         correlationId: z.string().optional(),
         domain: z.string().optional(),
@@ -1087,6 +1193,130 @@ export const buildServer = (deps: ServerDeps = {}): FastifyInstance => {
     if (updated && jobQueue) await jobQueue.enqueue(updated);
     await emitJobEvent(ctx, "job.retried", { ...(updated ?? job), status: "queued", attempts });
     return reply.send({ job: updated ?? job });
+  });
+
+  const approveJob = async (
+    ctx: RequestContext,
+    job: JobRecord,
+    reason?: string
+  ): Promise<{ status: "approved" | "already_approved" | "no_pending"; job: JobRecord }> => {
+    const { store } = scopedDeps(ctx);
+    const decisionId = job.decisionId ?? undefined;
+    const existing =
+      decisionId || job.id
+        ? await store.query({
+            tenantId: ctx.tenantId,
+            decisionId: decisionId,
+            aggregateId: decisionId ? undefined : job.id,
+            types: ["job.approved", "decision.approved"],
+            limit: 1,
+          })
+        : [];
+    if (existing.length > 0) return { status: "already_approved", job };
+
+    if (job.status !== "awaiting_approval") {
+      return { status: "no_pending", job };
+    }
+
+    const now = new Date().toISOString();
+    const updated =
+      (await jobRepo?.updateStatus(ctx.tenantId, job.id, {
+        status: "queued",
+        runAt: now,
+        lockedAt: null,
+        lockedBy: null,
+      })) ?? job;
+    metrics.jobs.queued += 1;
+    const reasonSafe = reason ? safeSummary(reason, 160) : undefined;
+    if (updated.decisionId) {
+      await emitDecisionEvent(ctx, "decision.approved", {
+        decisionId: updated.decisionId,
+        correlationId: updated.correlationId ?? updated.decisionId,
+        domain: updated.domain,
+        approvedBy: { userId: ctx.actor.userId },
+        approvedAt: now,
+        reasonSafe,
+      });
+    }
+    await emitJobEvent(ctx, "job.approved", updated, {
+      approvedBy: { userId: ctx.actor.userId },
+      approvedAt: now,
+      reasonSafe,
+    });
+    await emitJobEvent(ctx, "job.queued", updated, { summarySafe: "Aprovado e reenfileirado" });
+    if (jobQueue) await jobQueue.enqueue(updated);
+    return { status: "approved", job: updated };
+  };
+
+  const approvalBodySchema = z.object({ reason: z.string().max(240).optional() });
+
+  app.post("/jobs/:jobId/approve", async (request, reply) => {
+    const guard = ensureRole(request, reply, ["admin"]);
+    if (guard) return guard;
+    const ctx = (request as any).ctx as RequestContext;
+    if (!jobRepo) return sendError(request, reply, 500, "jobs_unavailable", "Jobs require database backend");
+    const parsed = approvalBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return sendError(request, reply, 400, "invalid_approval", "Invalid approval payload", parsed.error.issues);
+    }
+    const jobId = (request.params as any).jobId as string;
+    const job = await jobRepo.getJob(ctx.tenantId, jobId);
+    if (!job) return sendError(request, reply, 404, "job_not_found", "Job not found");
+    const result = await approveJob(ctx, job, parsed.data.reason);
+    if (result.status === "no_pending") {
+      return reply.status(200).send({ jobId, status: job.status, note: "already_processed" });
+    }
+    return reply.send({
+      jobId,
+      status: result.job.status,
+      decisionId: result.job.decisionId,
+      capabilities: { canExecute: false, v: "v0" },
+    });
+  });
+
+  app.post("/decisions/:decisionId/approve", async (request, reply) => {
+    const guard = ensureRole(request, reply, ["admin"]);
+    if (guard) return guard;
+    const ctx = (request as any).ctx as RequestContext;
+    if (!jobRepo) return sendError(request, reply, 500, "jobs_unavailable", "Jobs require database backend");
+    const parsed = approvalBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return sendError(request, reply, 400, "invalid_approval", "Invalid approval payload", parsed.error.issues);
+    }
+    const decisionId = (request.params as any).decisionId as string;
+    if (!decisionId) return sendError(request, reply, 400, "missing_decision_id", "Missing decisionId");
+    const { store } = scopedDeps(ctx);
+    const decisionEvents = await store.query({ decisionId, tenantId: ctx.tenantId, limit: 1 });
+    if (!decisionEvents.length) {
+      return sendError(request, reply, 404, "decision_not_found", "Decision not found");
+    }
+
+    const approvedAlready = await store.query({
+      decisionId,
+      tenantId: ctx.tenantId,
+      types: ["decision.approved", "job.approved"],
+      limit: 1,
+    });
+    if (approvedAlready.length > 0) {
+      return reply.send({
+        decisionId,
+        status: "already_approved",
+        capabilities: { canExecute: false, v: "v0" },
+      });
+    }
+
+    const awaitingJob = await findAwaitingJobByDecision(ctx.tenantId, decisionId);
+    if (!awaitingJob) {
+      return sendError(request, reply, 409, "no_job_awaiting_approval", "No job awaiting approval");
+    }
+
+    const result = await approveJob(ctx, awaitingJob, parsed.data.reason);
+    return reply.send({
+      decisionId,
+      jobId: result.job.id,
+      status: result.job.status,
+      capabilities: { canExecute: false, v: "v0" },
+    });
   });
 
   const deriveJobSpecFromSnapshot = (snapshot: PlannerSnapshot) => {

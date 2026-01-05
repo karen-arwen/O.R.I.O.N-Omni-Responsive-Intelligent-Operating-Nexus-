@@ -11,6 +11,8 @@ import {
   executeDecision,
   cancelJob,
   retryJob,
+  approveDecision,
+  approveJob,
 } from "../api/endpoints";
 import type { JobsQueryParams } from "../api/endpoints";
 import { queryKeys } from "./keys";
@@ -27,7 +29,9 @@ export const useTimeline = (params: Record<string, unknown>) => {
       return data;
     },
     getNextPageParam: (last) => last.nextCursor ?? undefined,
-    enabled: Boolean(params.correlationId || params.decisionId || params.domain || params.types || params.from || params.to),
+    enabled: Boolean(
+      params.correlationId || params.decisionId || params.domain || params.types || params.from || params.to || params.jobId
+    ),
     staleTime: 15_000,
   });
 };
@@ -130,6 +134,32 @@ export const useRetryJob = () => {
     onSuccess: (_data, jobId) => {
       qc.invalidateQueries({ queryKey: queryKeys.job(jobId) });
       qc.invalidateQueries({ queryKey: queryKeys.jobsSummary });
+    },
+  });
+};
+
+export const useApproveDecision = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ decisionId, reason }: { decisionId: string; reason?: string }) => approveDecision(decisionId, reason),
+    onSuccess: (res) => {
+      if (res.jobId) qc.invalidateQueries({ queryKey: queryKeys.job(res.jobId) });
+      qc.invalidateQueries({ queryKey: queryKeys.jobsSummary });
+      qc.invalidateQueries({ queryKey: queryKeys.timeline({ decisionId: res.decisionId }) });
+    },
+  });
+};
+
+export const useApproveJob = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ jobId, reason }: { jobId: string; reason?: string }) => approveJob(jobId, reason),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: queryKeys.job(res.jobId) });
+      qc.invalidateQueries({ queryKey: queryKeys.jobsSummary });
+      if (res.decisionId) {
+        qc.invalidateQueries({ queryKey: queryKeys.timeline({ decisionId: res.decisionId }) });
+      }
     },
   });
 };

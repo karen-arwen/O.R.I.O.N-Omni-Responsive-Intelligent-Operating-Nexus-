@@ -24,6 +24,7 @@ describe("POST /decisions/:decisionId/execute contract", () => {
   let permissions: PermissionEngine;
   let jobRepo: InMemoryJobRepository;
   let jobQueue: FakeJobQueue;
+  let server: ReturnType<typeof buildServer> | null = null;
 
   beforeEach(() => {
     store = new InMemoryEventStore();
@@ -33,7 +34,11 @@ describe("POST /decisions/:decisionId/execute contract", () => {
     jobQueue = new FakeJobQueue();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    if (server) {
+      await server.close();
+      server = null;
+    }
     delete process.env.ORION_AUTH_TOKEN_ROLES_valid;
   });
 
@@ -49,7 +54,7 @@ describe("POST /decisions/:decisionId/execute contract", () => {
   };
 
   it("returns 404 for unknown decision", async () => {
-    const server = buildServer({ eventStore: store, auditLogger: audit, permissionEngine: permissions, jobRepo, jobQueue });
+    server = buildServer({ eventStore: store, auditLogger: audit, permissionEngine: permissions, jobRepo, jobQueue });
     const res = await server.inject({ method: "POST", url: "/decisions/missing/execute" });
     expect(res.statusCode).toBe(404);
     expect(res.json().error.code).toBe("decision_not_found");
@@ -57,7 +62,7 @@ describe("POST /decisions/:decisionId/execute contract", () => {
 
   it("rejects non-ready decisions with 409", async () => {
     const conservativePerms = new PermissionEngine(store, audit); // default require-approval => suggested
-    const server = buildServer({ eventStore: store, auditLogger: audit, permissionEngine: conservativePerms, jobRepo, jobQueue });
+    server = buildServer({ eventStore: store, auditLogger: audit, permissionEngine: conservativePerms, jobRepo, jobQueue });
     const planner = new Planner({ eventStore: store, audit, permissions: conservativePerms });
     await planner.decide({
       intent: { type: "tasks.create", domain: "tasks", action: "create" },
@@ -71,7 +76,7 @@ describe("POST /decisions/:decisionId/execute contract", () => {
 
   it("creates a job idempotently, emits job.created/job.queued, and enqueues", async () => {
     await buildReadyDecision("dec-exec", "tenant-a", "corr-exec");
-    const server = buildServer({ eventStore: store, auditLogger: audit, permissionEngine: permissions, jobRepo, jobQueue });
+    server = buildServer({ eventStore: store, auditLogger: audit, permissionEngine: permissions, jobRepo, jobQueue });
 
     const first = await server.inject({ method: "POST", url: "/decisions/dec-exec/execute", headers: { "x-tenant-id": "tenant-a" } });
     expect(first.statusCode).toBe(201);
@@ -93,7 +98,7 @@ describe("POST /decisions/:decisionId/execute contract", () => {
   it("isolates tenants for idempotency", async () => {
     await buildReadyDecision("dec-shared", "tenant-a", "corr-a");
     await buildReadyDecision("dec-shared", "tenant-b", "corr-b");
-    const server = buildServer({ eventStore: store, auditLogger: audit, permissionEngine: permissions, jobRepo, jobQueue });
+    server = buildServer({ eventStore: store, auditLogger: audit, permissionEngine: permissions, jobRepo, jobQueue });
 
     const resA = await server.inject({ method: "POST", url: "/decisions/dec-shared/execute", headers: { "x-tenant-id": "tenant-a" } });
     const resB = await server.inject({ method: "POST", url: "/decisions/dec-shared/execute", headers: { "x-tenant-id": "tenant-b" } });
@@ -103,7 +108,7 @@ describe("POST /decisions/:decisionId/execute contract", () => {
   });
 
   it("enforces auth/roles (401/403)", async () => {
-    const server = buildServer({
+    server = buildServer({
       eventStore: store,
       auditLogger: audit,
       permissionEngine: permissions,

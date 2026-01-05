@@ -24,7 +24,9 @@
     "migrate:api": "tsx apps/api/scripts/migrate.ts",
     "dev:infra": "docker compose -f docker-compose.dev.yml up -d postgres redis",
     "test:integration": "node scripts/run-integration.js",
-    "verify": "npm run lint:web && npm run typecheck:web && npm run lint:api && npm run typecheck:api && npm run test && npm run build:web && npm run build:api",
+    "verify:fast": "npm run lint:web && npm run typecheck:web && npm run lint:api && npm run typecheck:api && npm run test",
+    "verify:full": "npm run verify:fast && npm run build:web && npm run build:api",
+    "verify": "npm run verify:full",
     "dev:worker": "tsx apps/worker/src/index.ts",
     "build:worker": "tsc --project apps/worker/tsconfig.json --outDir dist/worker",
     "worker": "node dist/worker/index.js"

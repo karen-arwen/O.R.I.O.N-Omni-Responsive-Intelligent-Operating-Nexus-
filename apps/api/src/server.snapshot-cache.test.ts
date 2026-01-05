@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { afterEach, describe, it, expect, beforeEach } from "vitest";
 import { buildServer } from "./server";
 import { InMemoryEventStore } from "../../../packages/event-store/src";
 import { RedisCache } from "./cache";
@@ -42,6 +42,10 @@ describe("snapshot cache keyed by etag", () => {
       redisCache: cache,
       envOverrides: { ORION_DEV_AUTH_BYPASS: "true", ORION_CACHE_ENABLED: "true", ORION_RATE_LIMIT_BACKEND: "memory" },
     });
+  });
+
+  afterEach(async () => {
+    await server.close();
   });
 
   const appendFinal = async (id: string, ts: string, summary: string) => {

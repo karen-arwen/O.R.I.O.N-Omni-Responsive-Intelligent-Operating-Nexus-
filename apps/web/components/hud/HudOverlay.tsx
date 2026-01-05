@@ -25,7 +25,9 @@ export const HudOverlay = ({
   if (!enabled) return null;
   const status = trust.isError ? "Offline" : "Online";
   const jobCounts = jobs.data?.counts ?? {};
-  const jobSummary = jobs.data?.unavailable ? "Jobs offline" : `Jobs q:${jobCounts.queued ?? 0} r:${jobCounts.running ?? 0}`;
+  const jobSummary = jobs.data?.unavailable
+    ? "Jobs offline"
+    : `Jobs q:${jobCounts.queued ?? 0} r:${jobCounts.running ?? 0} a:${jobCounts.awaiting_approval ?? 0}`;
 
   return (
     <div className="pointer-events-none fixed inset-x-0 top-2 z-40 px-4 flex justify-center">

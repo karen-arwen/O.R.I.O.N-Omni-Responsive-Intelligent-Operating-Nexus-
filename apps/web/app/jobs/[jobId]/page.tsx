@@ -8,25 +8,22 @@ import { Badge } from "../../../components/ui/Badge";
 import { Button } from "../../../components/ui/Button";
 import { Skeleton } from "../../../components/ui/Skeleton";
 import { TimelineList } from "../../../components/timeline/TimelineList";
-import { useCancelJob, useJob, useRetryJob, useTimeline } from "../../../lib/query/hooks";
+import { useApproveJob, useCancelJob, useJob, useRetryJob, useTimeline } from "../../../lib/query/hooks";
 import { toast } from "../../../components/ui/Toast";
+import { loadAuthSettings } from "../../../lib/settings/authSettings";
+import { exportTrace } from "../../../lib/export/exportTrace";
 
 export default function JobDetailPage({ params }: { params: { jobId: string } }) {
   const jobId = params.jobId;
   const job = useJob(jobId);
   const jobData = job.data?.job;
-  const timeline = useTimeline(
-    jobData
-      ? {
-        decisionId: jobData.decisionId ?? undefined,
-        correlationId: jobData.correlationId ?? undefined,
-        limit: 30,
-      }
-      : {}
-  );
-  const timelineItems = useMemo(() => timeline.data?.pages.flatMap((p) => p.items) ?? [], [timeline.data]);
+  const runLog = useTimeline(jobData ? { jobId, limit: 30 } : {});
+  const runItems = useMemo(() => runLog.data?.pages.flatMap((p) => p.items) ?? [], [runLog.data]);
   const cancelJob = useCancelJob();
   const retryJob = useRetryJob();
+  const approveJob = useApproveJob();
+  const auth = loadAuthSettings();
+  const isAdmin = (auth.roles ?? []).map((r) => r.toLowerCase()).includes("admin");
 
   const handleCancel = async () => {
     if (!jobId) return;
@@ -40,6 +37,23 @@ export default function JobDetailPage({ params }: { params: { jobId: string } })
     await retryJob.mutateAsync(jobId);
     toast.success("Job reenfileirado");
     job.refetch();
+  };
+
+  const handleApprove = async () => {
+    if (!jobId) return;
+    await approveJob.mutateAsync({ jobId });
+    toast.success("Job aprovado");
+    job.refetch();
+    runLog.refetch();
+  };
+
+  const handleExport = async () => {
+    await exportTrace({
+      correlationId: jobData?.correlationId ?? jobId,
+      filters: { jobId },
+      items: runItems,
+    });
+    toast.success("Job trace exportado");
   };
 
   return (
@@ -79,41 +93,59 @@ export default function JobDetailPage({ params }: { params: { jobId: string } })
                   </p>
                 </div>
                 <div className="flex gap-2">
-                  <Button variant="ghost" size="sm" disabled={cancelJob.isLoading} onClick={handleCancel}>
-                    Cancelar
-                  </Button>
-                  <Button variant="secondary" size="sm" disabled={retryJob.isLoading} onClick={handleRetry}>
-                    Retry
-                  </Button>
+                  {jobData.status === "awaiting_approval" ? (
+                    isAdmin ? (
+                      <Button variant="secondary" size="sm" disabled={approveJob.isLoading} onClick={handleApprove}>
+                        Approve
+                      </Button>
+                    ) : (
+                      <span className="text-[11px] text-muted-foreground">Admin approval required</span>
+                    )
+                  ) : (
+                    <>
+                      <Button variant="ghost" size="sm" disabled={cancelJob.isLoading} onClick={handleCancel}>
+                        Cancelar
+                      </Button>
+                      <Button variant="secondary" size="sm" disabled={retryJob.isLoading} onClick={handleRetry}>
+                        Retry
+                      </Button>
+                    </>
+                  )}
                 </div>
               </div>
             )}
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Timeline do job</CardTitle>
-            <CardDescription>Eventos sanitizados (job.* e tool.*)</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {timeline.isLoading && <Skeleton className="h-24 w-full" />}
-            {timelineItems.length > 0 && (
-              <TimelineList
-                items={timelineItems}
-                hasNext={!!timeline.hasNextPage}
-                onLoadMore={() => timeline.fetchNextPage()}
-                filters={{
-                  decisionId: jobData?.decisionId,
-                  correlationId: jobData?.correlationId,
-                }}
-              />
-            )}
-            {!timeline.isLoading && timelineItems.length === 0 && (
-              <p className="text-sm text-muted-foreground">Nenhum evento encontrado.</p>
-            )}
-          </CardContent>
-        </Card>
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle>Run Log</CardTitle>
+                  <CardDescription>Eventos sanitizados (job.* e tool.*)</CardDescription>
+                </div>
+                <Button variant="ghost" size="sm" onClick={handleExport}>
+                  Export Job Trace
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {runLog.isLoading && <Skeleton className="h-24 w-full" />}
+              {runItems.length > 0 && (
+                <TimelineList
+                  items={runItems}
+                  hasNext={!!runLog.hasNextPage}
+                  onLoadMore={() => runLog.fetchNextPage()}
+                  filters={{
+                    jobId,
+                  }}
+                />
+              )}
+              {!runLog.isLoading && runItems.length === 0 && (
+                <p className="text-sm text-muted-foreground">Nenhum evento encontrado.</p>
+              )}
+            </CardContent>
+          </Card>
       </div>
     </AppShell>
   );
@@ -127,6 +159,8 @@ const JobStatusBadge = ({ status }: { status: string }) => {
       ? "secondary"
       : status === "running"
       ? "default"
+      : status === "awaiting_approval"
+      ? "warning"
       : status === "failed" || status === "dead_letter"
       ? "destructive"
       : "outline";

@@ -10,8 +10,10 @@ import { toast } from "../../../components/ui/Toast";
 import { Button } from "../../../components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../../components/ui/Card";
 import { Skeleton } from "../../../components/ui/Skeleton";
-import { useFeedbackMutation, useSnapshot, useTimeline } from "../../../lib/query/hooks";
+import { useApproveDecision, useFeedbackMutation, useJobs, useSnapshot, useTimeline } from "../../../lib/query/hooks";
 import { AccessGuard } from "../../../components/common/AccessGuard";
+import { Badge } from "../../../components/ui/Badge";
+import { loadAuthSettings } from "../../../lib/settings/authSettings";
 
 export default function DecisionDetailPage() {
   const params = useParams<{ decisionId: string }>();
@@ -19,6 +21,10 @@ export default function DecisionDetailPage() {
   const snapshot = useSnapshot(decisionId);
   const timeline = useTimeline({ decisionId, kind: "decision", limit: 50 });
   const feedback = useFeedbackMutation();
+  const jobs = useJobs({ decisionId, limit: 5 });
+  const approveDecision = useApproveDecision();
+  const auth = loadAuthSettings();
+  const isAdmin = (auth.roles ?? []).map((r) => r.toLowerCase()).includes("admin");
 
   useEffect(() => {
     if (feedback.isSuccess) toast.success("Feedback registrado");
@@ -28,12 +34,22 @@ export default function DecisionDetailPage() {
   const data = snapshot.data && "snapshot" in snapshot.data ? snapshot.data : null;
   const events = useMemo(() => timeline.data?.pages.flatMap((p) => p.items) ?? [], [timeline.data]);
   const etagStatus = snapshot.data && "fromCache" in snapshot.data ? (snapshot.data.fromCache ? "Cached (304)" : "Updated") : "";
+  const awaitingJob = useMemo(
+    () => jobs.data?.pages.flatMap((p) => p.jobs).find((j) => j.status === "awaiting_approval"),
+    [jobs.data]
+  );
 
   const onExportDecision = () => exportTrace({ decisionId, filters: { decisionId }, items: events, snapshot: data?.snapshot });
   const onExportBundle = async () => {
     const summary = await exportBundle({ decisionId, filters: { decisionId }, items: events, snapshot: data?.snapshot });
     toast.success("Bundle exportado");
     navigator.clipboard.writeText(summary);
+  };
+  const onApprove = async () => {
+    await approveDecision.mutateAsync({ decisionId });
+    toast.success("Aprovado");
+    jobs.refetch();
+    timeline.refetch();
   };
 
   return (
@@ -80,6 +96,27 @@ export default function DecisionDetailPage() {
               Export bundle
             </Button>
           </div>
+
+          {awaitingJob && (
+            <Card variant="glow">
+              <CardContent className="flex items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="warning">awaiting_approval</Badge>
+                    <span className="text-xs text-muted-foreground">Job {awaitingJob.id}</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground">Approval required before execution.</p>
+                </div>
+                {isAdmin ? (
+                  <Button size="sm" onClick={onApprove} disabled={approveDecision.isLoading}>
+                    Approve
+                  </Button>
+                ) : (
+                  <span className="text-[11px] text-muted-foreground">Admin approval required</span>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           <Card>
             <CardHeader>
